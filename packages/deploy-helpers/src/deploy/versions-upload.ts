@@ -233,6 +233,7 @@ export default async function versionsUpload(
 		logpush: undefined, // logpush and observability are non-versioned settings
 		observability: undefined,
 		cache: config.cache, // cache is a versioned setting
+		package_dependencies: props.packageDependencies,
 	};
 
 	await printBundleSize(
