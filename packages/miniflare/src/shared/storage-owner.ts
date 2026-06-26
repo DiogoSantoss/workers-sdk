@@ -30,26 +30,16 @@ export const OWNER_STALE_MS = 30_000;
 export const OWNER_HEARTBEAT_MS = 5_000;
 const OWNER_LOCK_RETRY_MS = 50;
 
-// Describes how to reach one storage plugin's Durable Object on the owner. The
-// `uniqueKey` MUST match the value the owner's plugin used so that
-// `idFromName(id)` produces an identical actor id on both sides — that is the
-// invariant that lets a client's proxy DO namespace address the owner's actor.
-export interface StorageOwnerPluginService {
-	/** workerd service name hosting the DO (e.g. "kv:ns"). */
-	service: string;
-	/** DO class name (e.g. "KVNamespaceObject"). */
-	className: string;
-	/** DO `uniqueKey` (e.g. "miniflare-KVNamespaceObject"). */
-	uniqueKey: string;
-}
-
 export interface StorageOwnerDefinition {
 	/** PID of the owner process, used for liveness / orphan reclaim. */
 	pid: number;
-	/** workerd debug-port address of the owner (e.g. "127.0.0.1:12345"). */
+	/**
+	 * workerd debug-port address of the owner (e.g. "127.0.0.1:12345"). Clients
+	 * connect here and resolve the owner's storage entry services by their
+	 * well-known, version-stable service names (e.g. "kv:ns:entry"), so no
+	 * per-plugin service list needs to be advertised here.
+	 */
 	debugPortAddress: string;
-	/** Per-plugin routing info, keyed by plugin name ("kv", "r2", "d1", "cache"). */
-	services: Record<string, StorageOwnerPluginService>;
 	/** Wall-clock time the definition was last (re)written. */
 	updatedAt: number;
 }

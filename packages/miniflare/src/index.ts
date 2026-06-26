@@ -89,11 +89,18 @@ import {
 } from "./runtime";
 import {
 	_isCyclic,
+	clearStorageOwner,
+	heartbeatStorageClient,
+	heartbeatStorageOwner,
 	isFileNotFoundError,
 	MiniflareCoreError,
 	NoOpLog,
+	OWNER_HEARTBEAT_MS,
 	parseWithRootPath,
+	registerStorageClient,
 	stripAnsi,
+	unregisterStorageClient,
+	writeStorageOwner,
 } from "./shared";
 import { DevRegistry, getWorkerRegistry } from "./shared/dev-registry";
 import {
@@ -165,6 +172,74 @@ import type { Duplex, Transform, Writable } from "node:stream";
 import type { Dispatcher, Response as UndiciResponse } from "undici";
 
 const DEFAULT_HOST = "127.0.0.1";
+const PERSIST_ROOT_STARTUP_LOCK = ".miniflare-startup.lock";
+const PERSIST_ROOT_STARTUP_LOCK_STALE_MS = 30_000;
+const PERSIST_ROOT_STARTUP_LOCK_RETRY_MS = 50;
+
+async function wait(ms: number): Promise<void> {
+	await new Promise((resolve) => setTimeout(resolve, ms));
+}
+
+async function withPersistRootStartupLock<T>(
+	persistRoot: string | undefined,
+	signal: AbortSignal,
+	callback: () => Promise<T>
+): Promise<T> {
+	if (persistRoot === undefined || signal.aborted) {
+		return callback();
+	}
+
+	await mkdir(persistRoot, { recursive: true });
+	const lockPath = path.join(persistRoot, PERSIST_ROOT_STARTUP_LOCK);
+	let lock: fs.promises.FileHandle | undefined;
+	let heartbeat: NodeJS.Timeout | undefined;
+
+	while (lock === undefined && !signal.aborted) {
+		try {
+			lock = await fs.promises.open(lockPath, "wx");
+			await lock.writeFile(`${process.pid}\n${Date.now()}\n`);
+			heartbeat = setInterval(() => {
+				fs.promises.utimes(lockPath, new Date(), new Date()).catch(() => {});
+			}, 1_000);
+			break;
+		} catch (e) {
+			if ((e as NodeJS.ErrnoException).code !== "EEXIST") {
+				throw e;
+			}
+
+			try {
+				const stats = await fs.promises.stat(lockPath);
+				if (
+					stats.mtime.getTime() <
+					Date.now() - PERSIST_ROOT_STARTUP_LOCK_STALE_MS
+				) {
+					await fs.promises.rm(lockPath, { force: true });
+					continue;
+				}
+			} catch (statError) {
+				if ((statError as NodeJS.ErrnoException).code !== "ENOENT") {
+					throw statError;
+				}
+			}
+
+			await wait(PERSIST_ROOT_STARTUP_LOCK_RETRY_MS);
+		}
+	}
+	if (lock === undefined) {
+		return callback();
+	}
+
+	try {
+		return await callback();
+	} finally {
+		if (heartbeat !== undefined) {
+			clearInterval(heartbeat);
+		}
+		await lock?.close();
+		await fs.promises.rm(lockPath, { force: true });
+	}
+}
+
 function getURLSafeHost(host: string) {
 	return net.isIPv6(host) ? `[${host}]` : host;
 }
@@ -1016,6 +1091,13 @@ export class Miniflare {
 	readonly #webSocketExtraHeaders: WeakMap<http.IncomingMessage, Headers>;
 	readonly #devRegistry: DevRegistry;
 
+	// Shared-storage-owner state (experimental `unsafeSharedStorageOwner`).
+	// `#storageOwnerHeartbeat` keeps the owner definition / client presence file
+	// fresh; `#storageClientPath` is this instance's client-presence file (client
+	// role only) so it can be removed on dispose.
+	#storageOwnerHeartbeat?: NodeJS.Timeout;
+	#storageClientPath?: string;
+
 	#maybeInspectorProxyController?: InspectorProxyController;
 	#previousRuntimeInspectorPort?: number;
 
@@ -1145,6 +1227,8 @@ export class Miniflare {
 			// The .catch() will never run since the event loop won't tick again,
 			// but the synchronous portion still executes.
 			this.#devRegistry.dispose();
+			// Best-effort sync removal of our shared-storage presence files.
+			this.#disposeStorageOwnerPresence();
 		});
 
 		this.#disposeController = new AbortController();
@@ -2407,6 +2491,7 @@ export class Miniflare {
 		// This function must be run with `#runtimeMutex` held
 		const initial = !this.#runtimeEntryURL;
 		assert(this.#runtime !== undefined);
+		const runtime = this.#runtime;
 		const configuredHost = this.#sharedOpts.core.host ?? DEFAULT_HOST;
 		// For internal loopback communication with workerd, always use 127.0.0.1
 		// when localhost is configured. This prevents IPv6/IPv4 mismatch issues
@@ -2487,11 +2572,16 @@ export class Miniflare {
 			handleStructuredLogs: this.#sharedOpts.core.handleStructuredLogs,
 			runtimeEnv: this.#sharedOpts.core.unsafeRuntimeEnv,
 		};
-		const maybeSocketPorts = await this.#runtime.updateConfig(
-			configBuffer,
-			runtimeOpts,
-			this.#workerOpts.flatMap((w) => w.core.name ?? []),
-			this.#disposeController.signal
+		const maybeSocketPorts = await withPersistRootStartupLock(
+			this.#sharedOpts.core.defaultPersistRoot,
+			this.#disposeController.signal,
+			() =>
+				runtime.updateConfig(
+					configBuffer,
+					runtimeOpts,
+					this.#workerOpts.flatMap((w) => w.core.name ?? []),
+					this.#disposeController.signal
+				)
 		);
 		if (this.#disposeController.signal.aborted) return;
 		if (maybeSocketPorts === undefined) {
@@ -2588,6 +2678,8 @@ export class Miniflare {
 
 		await this.#registerWorkers();
 
+		this.#updateStorageOwnerPresence();
+
 		// Catch any registry updates that occurred while workerd was booting.
 		if (this.#devRegistry.isEnabled()) {
 			await this.#pushRegistryUpdate();
@@ -2668,6 +2760,84 @@ export class Miniflare {
 		assert(this.#runtimeEntryURL !== undefined);
 		// Return a copy so external mutations don't propagate to `#runtimeEntryURL`
 		return new URL(this.#runtimeEntryURL.toString());
+	}
+
+	/**
+	 * The persist root this instance participates in as a shared storage
+	 * owner/client, or `undefined` if the feature is off or there is nothing to
+	 * share (pure in-memory storage).
+	 */
+	#storageOwnerPersistRoot(): string | undefined {
+		const core = this.#sharedOpts.core;
+		if (!core.unsafeSharedStorageOwner) {
+			return undefined;
+		}
+		return core.defaultPersistRoot;
+	}
+
+	/**
+	 * Publishes this instance's role in the shared-storage topology once the
+	 * runtime (and therefore the debug port) is available:
+	 * - owner: writes the owner definition so clients can discover and route to
+	 *   its debug port, and heartbeats it.
+	 * - client: registers a presence file (and heartbeats it) so the owner can
+	 *   tell when no clients remain and tear itself down.
+	 */
+	#updateStorageOwnerPresence(): void {
+		const persistRoot = this.#storageOwnerPersistRoot();
+		if (persistRoot === undefined) {
+			return;
+		}
+		if (this.#storageOwnerHeartbeat !== undefined) {
+			clearInterval(this.#storageOwnerHeartbeat);
+			this.#storageOwnerHeartbeat = undefined;
+		}
+
+		const isOwner = this.#sharedOpts.core.unsafeStorageOwnerRole === "owner";
+		if (isOwner) {
+			const debugPort = this.#socketPorts?.get(SOCKET_DEBUG_PORT);
+			if (debugPort === undefined) {
+				this.#log.warn(
+					"Shared storage owner enabled but the debug port is unavailable " +
+						"(is `unsafeDevRegistryPath` set?) — storage will not be shared"
+				);
+				return;
+			}
+			writeStorageOwner(persistRoot, {
+				pid: process.pid,
+				debugPortAddress: `127.0.0.1:${debugPort}`,
+				updatedAt: Date.now(),
+			});
+			this.#storageOwnerHeartbeat = setInterval(() => {
+				heartbeatStorageOwner(persistRoot);
+			}, OWNER_HEARTBEAT_MS);
+		} else {
+			this.#storageClientPath = registerStorageClient(persistRoot);
+			const clientPath = this.#storageClientPath;
+			this.#storageOwnerHeartbeat = setInterval(() => {
+				heartbeatStorageClient(clientPath);
+			}, OWNER_HEARTBEAT_MS);
+		}
+		// Don't keep the event loop alive solely for the heartbeat.
+		this.#storageOwnerHeartbeat?.unref?.();
+	}
+
+	/** Tears down this instance's shared-storage presence on dispose. */
+	#disposeStorageOwnerPresence(): void {
+		if (this.#storageOwnerHeartbeat !== undefined) {
+			clearInterval(this.#storageOwnerHeartbeat);
+			this.#storageOwnerHeartbeat = undefined;
+		}
+		const persistRoot = this.#storageOwnerPersistRoot();
+		if (persistRoot === undefined) {
+			return;
+		}
+		if (this.#sharedOpts.core.unsafeStorageOwnerRole === "owner") {
+			clearStorageOwner(persistRoot, process.pid);
+		} else if (this.#storageClientPath !== undefined) {
+			unregisterStorageClient(this.#storageClientPath);
+			this.#storageClientPath = undefined;
+		}
 	}
 
 	async #registerWorkers(): Promise<void> {
@@ -3224,6 +3394,9 @@ export class Miniflare {
 			await this.#maybeInspectorProxyController?.dispose();
 			// Unregister workers from dev registry and stop the file watcher
 			await this.#devRegistry.dispose();
+
+			// Remove our shared-storage owner/client presence files
+			this.#disposeStorageOwnerPresence();
 
 			// shutdown hyperdrive proxies if any exist
 			await this.#hyperdriveProxyController.dispose();

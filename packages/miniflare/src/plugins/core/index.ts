@@ -330,6 +330,11 @@ export const CoreSharedOptionsSchema = z
 		// contention when multiple Miniflare instances share a persist root.
 		// No-op when `defaultPersistRoot` is undefined (pure in-memory storage).
 		unsafeSharedStorageOwner: z.boolean().optional(),
+		// Internal: the role this instance plays in the shared-storage-owner
+		// topology. "owner" publishes itself as the storage owner for the persist
+		// root; "client" (the default when the feature is enabled) routes storage
+		// to whichever owner is published. Set on the detached owner process.
+		unsafeStorageOwnerRole: z.enum(["owner", "client"]).optional(),
 		// Strip the MF-DISABLE_PRETTY_ERROR header from user request
 		stripDisablePrettyError: z.boolean().default(true),
 

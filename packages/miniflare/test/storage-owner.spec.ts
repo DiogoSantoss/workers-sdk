@@ -5,6 +5,7 @@ import {
 	countLiveStorageClients,
 	heartbeatStorageOwner,
 	isProcessAlive,
+	Miniflare,
 	OWNER_STALE_MS,
 	readStorageOwner,
 	registerStorageClient,
@@ -13,7 +14,7 @@ import {
 	writeStorageOwner,
 	type StorageOwnerDefinition,
 } from "miniflare";
-import { describe, it } from "vitest";
+import { describe, it, vi } from "vitest";
 import { useTmp } from "./test-shared";
 
 // A pid that is essentially guaranteed not to exist on the host.
@@ -25,13 +26,6 @@ function makeDefinition(
 	return {
 		pid: process.pid,
 		debugPortAddress: "127.0.0.1:12345",
-		services: {
-			kv: {
-				service: "kv:ns",
-				className: "KVNamespaceObject",
-				uniqueKey: "miniflare-KVNamespaceObject",
-			},
-		},
 		updatedAt: Date.now(),
 		...overrides,
 	};
@@ -166,5 +160,80 @@ describe("client presence registry", () => {
 
 		unregisterStorageClient(clientPath);
 		expect(countLiveStorageClients(persistRoot)).toBe(0);
+	});
+});
+
+describe.sequential("owner presence integration", () => {
+	it("an owner-role instance publishes a live definition and clears it on dispose", async ({
+		expect,
+	}) => {
+		const persistRoot = await useTmp();
+		const registryPath = await useTmp();
+		const owner = new Miniflare({
+			unsafeSharedStorageOwner: true,
+			unsafeStorageOwnerRole: "owner",
+			defaultPersistRoot: persistRoot,
+			unsafeDevRegistryPath: registryPath,
+			compatibilityFlags: ["experimental"],
+			modules: true,
+			kvNamespaces: ["NS"],
+			script:
+				"export default { async fetch() { return new Response('owner'); } }",
+		});
+		await owner.ready;
+
+		const def = readStorageOwner(persistRoot);
+		expect(def).toBeDefined();
+		expect(def?.pid).toBe(process.pid);
+		expect(def?.debugPortAddress).toMatch(/^127\.0\.0\.1:\d+$/);
+
+		await owner.dispose();
+		expect(readStorageOwner(persistRoot)).toBeUndefined();
+	});
+
+	it("a client-role instance registers presence and removes it on dispose", async ({
+		expect,
+	}) => {
+		const persistRoot = await useTmp();
+		const registryPath = await useTmp();
+		const client = new Miniflare({
+			unsafeSharedStorageOwner: true,
+			unsafeStorageOwnerRole: "client",
+			defaultPersistRoot: persistRoot,
+			unsafeDevRegistryPath: registryPath,
+			compatibilityFlags: ["experimental"],
+			modules: true,
+			script:
+				"export default { async fetch() { return new Response('client'); } }",
+		});
+		await client.ready;
+
+		await vi.waitFor(
+			() => expect(countLiveStorageClients(persistRoot)).toBe(1),
+			{
+				timeout: 5_000,
+				interval: 100,
+			}
+		);
+
+		await client.dispose();
+		expect(countLiveStorageClients(persistRoot)).toBe(0);
+	});
+
+	it("does nothing when the feature flag is off", async ({ expect }) => {
+		const persistRoot = await useTmp();
+		const registryPath = await useTmp();
+		const mf = new Miniflare({
+			defaultPersistRoot: persistRoot,
+			unsafeDevRegistryPath: registryPath,
+			compatibilityFlags: ["experimental"],
+			modules: true,
+			script:
+				"export default { async fetch() { return new Response('plain'); } }",
+		});
+		await mf.ready;
+		expect(readStorageOwner(persistRoot)).toBeUndefined();
+		expect(countLiveStorageClients(persistRoot)).toBe(0);
+		await mf.dispose();
 	});
 });
