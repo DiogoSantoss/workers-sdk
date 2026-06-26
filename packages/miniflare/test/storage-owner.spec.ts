@@ -428,6 +428,87 @@ describe.sequential("owner presence integration", () => {
 		}
 	});
 
+	it("lets many client instances write one D1 concurrently without contention", async ({
+		expect,
+	}) => {
+		// This is the scenario that produces cross-process SQLITE_BUSY today: many
+		// processes opening the same SQLite file. With a shared owner, only the
+		// owner opens it, so concurrent writes from all clients succeed.
+		const persistRoot = await useTmp();
+		const registryPath = await useTmp();
+		const prevGrace = process.env.MINIFLARE_STORAGE_OWNER_GRACE_MS;
+		const prevCheck = process.env.MINIFLARE_STORAGE_OWNER_IDLE_CHECK_MS;
+		process.env.MINIFLARE_STORAGE_OWNER_GRACE_MS = "500";
+		process.env.MINIFLARE_STORAGE_OWNER_IDLE_CHECK_MS = "200";
+
+		const N = 3; // client instances
+		const M = 20; // inserts per client
+		const WORKER = `export default {
+			async fetch(request, env) {
+				const url = new URL(request.url);
+				if (url.searchParams.get("init") === "1") {
+					await env.DB.prepare("CREATE TABLE IF NOT EXISTS t(v INTEGER)").run();
+					return new Response("ok");
+				}
+				if (request.method === "PUT") {
+					await env.DB.prepare("INSERT INTO t(v) VALUES (1)").run();
+					return new Response("ok");
+				}
+				const row = await env.DB.prepare("SELECT COUNT(*) AS c FROM t").first();
+				return new Response(String(row.c));
+			}
+		}`;
+		const make = () =>
+			new Miniflare({
+				unsafeSharedStorageOwner: true,
+				defaultPersistRoot: persistRoot,
+				unsafeDevRegistryPath: registryPath,
+				compatibilityFlags: ["experimental"],
+				compatibilityDate: "2025-01-01",
+				modules: true,
+				d1Databases: ["DB"],
+				script: WORKER,
+			});
+
+		const clients = Array.from({ length: N }, make);
+		let ownerPid: number | undefined;
+		try {
+			await Promise.all(clients.map((c) => c.ready));
+			ownerPid = readStorageOwner(persistRoot)?.pid;
+			expect(ownerPid).toBeDefined();
+
+			// Create the table once, then hammer it concurrently from every client.
+			await clients[0].dispatchFetch("http://x/?init=1").then((r) => r.text());
+
+			const results = await Promise.all(
+				clients.flatMap((c) =>
+					Array.from({ length: M }, async () => {
+						const r = await c.dispatchFetch("http://x/", { method: "PUT" });
+						await r.text(); // consume body
+						return r.status;
+					})
+				)
+			);
+			// No request failed (e.g. with a 500 from SQLITE_BUSY).
+			expect(results.every((s) => s === 200)).toBe(true);
+
+			// All writes landed — no lost updates, no contention failures.
+			const count = await clients[0]
+				.dispatchFetch("http://x/")
+				.then((r) => r.text());
+			expect(count).toBe(String(N * M));
+		} finally {
+			await Promise.all(clients.map((c) => c.dispose().catch(() => {})));
+			if (ownerPid !== undefined && isProcessAlive(ownerPid)) {
+				try {
+					process.kill(ownerPid);
+				} catch {}
+			}
+			process.env.MINIFLARE_STORAGE_OWNER_GRACE_MS = prevGrace;
+			process.env.MINIFLARE_STORAGE_OWNER_IDLE_CHECK_MS = prevCheck;
+		}
+	});
+
 	it("does nothing when the feature flag is off", async ({ expect }) => {
 		const persistRoot = await useTmp();
 		const registryPath = await useTmp();
