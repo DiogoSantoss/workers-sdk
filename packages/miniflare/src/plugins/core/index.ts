@@ -27,7 +27,11 @@ import { RPC_PROXY_SERVICE_NAME } from "../assets/constants";
 import { getCacheServiceName } from "../cache";
 import { DURABLE_OBJECTS_STORAGE_SERVICE_NAME } from "../do";
 import { IMAGES_PLUGIN_NAME } from "../images";
-import { getR2PublicService, R2_PUBLIC_SERVICE_NAME } from "../r2";
+import {
+	getR2PublicService,
+	R2_PLUGIN_NAME,
+	R2_PUBLIC_SERVICE_NAME,
+} from "../r2";
 import {
 	buildRemoteProxyProps,
 	getUserBindingServiceName,
@@ -1031,6 +1035,8 @@ export interface GlobalServicesOptions {
 	workflowOptions?: Map<string, WorkflowOption>;
 	/** All worker options for building per-worker resource bindings */
 	allWorkerOpts?: PluginWorkerOptions[];
+	/** Storage plugins routed to a shared owner; their global services are skipped. */
+	storageOwnerRoutePlugins?: Set<string>;
 }
 export function getGlobalServices({
 	sharedOptions,
@@ -1043,6 +1049,7 @@ export function getGlobalServices({
 	durableObjectClassNames,
 	workflowOptions,
 	allWorkerOpts,
+	storageOwnerRoutePlugins,
 }: GlobalServicesOptions): Service[] {
 	// Collect list of workers we could route to, then parse and sort all routes
 	const workerNames = [...allWorkerRoutes.keys()];
@@ -1112,7 +1119,12 @@ export function getGlobalServices({
 			},
 		});
 	}
-	const r2PublicService = getR2PublicService(allWorkerOpts ?? []);
+	// When R2 is routed to a shared storage owner, the local R2 storage services
+	// (incl. the entry service the public worker binds) aren't stood up, so skip
+	// the public-bucket service too.
+	const r2PublicService = storageOwnerRoutePlugins?.has(R2_PLUGIN_NAME)
+		? undefined
+		: getR2PublicService(allWorkerOpts ?? []);
 	if (r2PublicService !== undefined) {
 		serviceEntryBindings.push({
 			name: CoreBindings.SERVICE_R2_PUBLIC,

@@ -278,6 +278,85 @@ describe.sequential("owner presence integration", () => {
 		}
 	});
 
+	it("routes a client's R2 and D1 through the owner so storage is shared", async ({
+		expect,
+	}) => {
+		const persistRoot = await useTmp();
+		const registryPath = await useTmp();
+		const WORKER = `export default {
+			async fetch(request, env) {
+				const url = new URL(request.url);
+				const kind = url.searchParams.get("kind");
+				if (kind === "r2") {
+					if (request.method === "PUT") {
+						await env.BUCKET.put("obj", await request.text());
+						return new Response("ok");
+					}
+					const o = await env.BUCKET.get("obj");
+					return new Response(o ? await o.text() : "<null>");
+				}
+				// d1
+				if (request.method === "PUT") {
+					await env.DB.prepare("CREATE TABLE IF NOT EXISTS t(v TEXT)").run();
+					await env.DB.prepare("INSERT INTO t(v) VALUES (?)").bind(await request.text()).run();
+					return new Response("ok");
+				}
+				const { results } = await env.DB.prepare("SELECT v FROM t").all();
+				return new Response(JSON.stringify(results.map((r) => r.v)));
+			}
+		}`;
+		const common = {
+			unsafeSharedStorageOwner: true,
+			defaultPersistRoot: persistRoot,
+			unsafeDevRegistryPath: registryPath,
+			compatibilityFlags: ["experimental"],
+			compatibilityDate: "2025-01-01",
+			modules: true,
+			r2Buckets: ["BUCKET"],
+			d1Databases: ["DB"],
+			script: WORKER,
+		};
+		const owner = new Miniflare({ ...common, unsafeStorageOwnerRole: "owner" });
+		await owner.ready;
+		const client = new Miniflare({
+			...common,
+			unsafeStorageOwnerRole: "client",
+		});
+
+		try {
+			await client.ready;
+
+			// R2: client write → owner read.
+			expect(
+				await (
+					await client.dispatchFetch("http://x/?kind=r2", {
+						method: "PUT",
+						body: "r2-from-client",
+					})
+				).text()
+			).toBe("ok");
+			expect(
+				await (await owner.dispatchFetch("http://x/?kind=r2")).text()
+			).toBe("r2-from-client");
+
+			// D1: client write → owner read.
+			expect(
+				await (
+					await client.dispatchFetch("http://x/?kind=d1", {
+						method: "PUT",
+						body: "d1-from-client",
+					})
+				).text()
+			).toBe("ok");
+			expect(
+				await (await owner.dispatchFetch("http://x/?kind=d1")).text()
+			).toBe(JSON.stringify(["d1-from-client"]));
+		} finally {
+			await client.dispose();
+			await owner.dispose();
+		}
+	});
+
 	it("auto-spawns a detached owner, routes to it, and tears it down when idle", async ({
 		expect,
 	}) => {

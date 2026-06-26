@@ -797,12 +797,56 @@ function storageOwnerProxyDesignator(ownerService: string, id: string) {
  * returned unchanged.
  */
 function rewriteStorageOwnerBinding(binding: Worker_Binding): Worker_Binding {
+	// KV namespace bindings.
 	if ("kvNamespace" in binding && binding.kvNamespace?.name !== undefined) {
 		const id = extractObjectEntryId(binding.kvNamespace.props?.json);
 		if (id !== undefined) {
 			return {
 				name: binding.name,
 				kvNamespace: storageOwnerProxyDesignator(binding.kvNamespace.name, id),
+			};
+		}
+	}
+	// R2 bucket bindings.
+	if ("r2Bucket" in binding && binding.r2Bucket?.name !== undefined) {
+		const id = extractObjectEntryId(binding.r2Bucket.props?.json);
+		if (id !== undefined) {
+			return {
+				name: binding.name,
+				r2Bucket: storageOwnerProxyDesignator(binding.r2Bucket.name, id),
+			};
+		}
+	}
+	// D1 (pre-Wrangler-3.3 `__D1_BETA__`) service binding.
+	if ("service" in binding && binding.service?.name !== undefined) {
+		const id = extractObjectEntryId(binding.service.props?.json);
+		if (id !== undefined) {
+			return {
+				name: binding.name,
+				service: storageOwnerProxyDesignator(binding.service.name, id),
+			};
+		}
+	}
+	// D1 (post-3.3) wrapped binding: rewrite the inner fetcher service designator.
+	if ("wrapped" in binding && binding.wrapped?.innerBindings !== undefined) {
+		let rewrote = false;
+		const innerBindings = binding.wrapped.innerBindings.map((inner) => {
+			if ("service" in inner && inner.service?.name !== undefined) {
+				const id = extractObjectEntryId(inner.service.props?.json);
+				if (id !== undefined) {
+					rewrote = true;
+					return {
+						...inner,
+						service: storageOwnerProxyDesignator(inner.service.name, id),
+					};
+				}
+			}
+			return inner;
+		});
+		if (rewrote) {
+			return {
+				...binding,
+				wrapped: { ...binding.wrapped, innerBindings },
 			};
 		}
 	}
@@ -2137,7 +2181,9 @@ export class Miniflare {
 		// no owner currently published).
 		const storageOwnerRouting = this.#getStorageOwnerRouting();
 		const storageOwnerRoutePlugins = new Set<string>(
-			storageOwnerRouting !== undefined ? ["kv"] : []
+			storageOwnerRouting !== undefined
+				? [KV_PLUGIN_NAME, R2_PLUGIN_NAME, D1_PLUGIN_NAME]
+				: []
 		);
 
 		const durableObjectClassNames = getDurableObjectClassNames(allWorkerOpts);
@@ -2575,6 +2621,7 @@ export class Miniflare {
 			durableObjectClassNames,
 			workflowOptions: workflowOptions.size > 0 ? workflowOptions : undefined,
 			allWorkerOpts,
+			storageOwnerRoutePlugins,
 		});
 		for (const service of globalServices) {
 			// Global services should all have unique names
@@ -3003,10 +3050,22 @@ export class Miniflare {
 		// generic (keyed by `idFromName`), so they additionally serve ids declared
 		// only by other clients.
 		const kvIds = new Set<string>();
+		const r2Ids = new Set<string>();
+		const d1Ids = new Set<string>();
 		for (const workerOpts of this.#workerOpts) {
 			for (const [, ns] of namespaceEntries(workerOpts.kv.kvNamespaces)) {
 				if (!ns.remoteProxyConnectionString) {
 					kvIds.add(ns.id);
+				}
+			}
+			for (const [, bucket] of namespaceEntries(workerOpts.r2.r2Buckets)) {
+				if (!bucket.remoteProxyConnectionString) {
+					r2Ids.add(bucket.id);
+				}
+			}
+			for (const [, db] of namespaceEntries(workerOpts.d1.d1Databases)) {
+				if (!db.remoteProxyConnectionString) {
+					d1Ids.add(db.id);
 				}
 			}
 		}
@@ -3018,6 +3077,8 @@ export class Miniflare {
 			script:
 				"export default { async fetch() { return new Response('miniflare storage owner', { status: 404 }); } }",
 			kvNamespaces: [...kvIds],
+			r2Buckets: [...r2Ids],
+			d1Databases: [...d1Ids],
 		};
 
 		const configPath = path.join(
