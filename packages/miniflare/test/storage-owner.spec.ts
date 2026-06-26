@@ -220,6 +220,64 @@ describe.sequential("owner presence integration", () => {
 		expect(countLiveStorageClients(persistRoot)).toBe(0);
 	});
 
+	it("routes a client's KV through the owner so storage is shared", async ({
+		expect,
+	}) => {
+		const persistRoot = await useTmp();
+		const registryPath = await useTmp();
+		const KV_WORKER = `export default {
+			async fetch(request, env) {
+				const url = new URL(request.url);
+				const key = url.searchParams.get("key") ?? "k";
+				if (request.method === "PUT") {
+					await env.NS.put(key, await request.text());
+					return new Response("ok");
+				}
+				const val = await env.NS.get(key);
+				return new Response(val ?? "<null>");
+			}
+		}`;
+		const common = {
+			unsafeSharedStorageOwner: true,
+			defaultPersistRoot: persistRoot,
+			unsafeDevRegistryPath: registryPath,
+			compatibilityFlags: ["experimental"],
+			compatibilityDate: "2025-01-01",
+			modules: true,
+			kvNamespaces: ["NS"],
+			script: KV_WORKER,
+		};
+
+		const owner = new Miniflare({ ...common, unsafeStorageOwnerRole: "owner" });
+		await owner.ready;
+		const client = new Miniflare({
+			...common,
+			unsafeStorageOwnerRole: "client",
+		});
+
+		try {
+			await client.ready;
+
+			// Write through the client (which routes to the owner).
+			const putRes = await client.dispatchFetch("http://x/?key=greeting", {
+				method: "PUT",
+				body: "hello-from-client",
+			});
+			expect(await putRes.text()).toBe("ok");
+
+			// The owner can read what the client wrote → storage is shared.
+			const ownerRes = await owner.dispatchFetch("http://x/?key=greeting");
+			expect(await ownerRes.text()).toBe("hello-from-client");
+
+			// And the client can read it back through the proxy.
+			const clientRes = await client.dispatchFetch("http://x/?key=greeting");
+			expect(await clientRes.text()).toBe("hello-from-client");
+		} finally {
+			await client.dispose();
+			await owner.dispose();
+		}
+	});
+
 	it("does nothing when the feature flag is off", async ({ expect }) => {
 		const persistRoot = await useTmp();
 		const registryPath = await useTmp();

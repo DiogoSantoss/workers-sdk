@@ -91,6 +91,11 @@ export interface PluginServicesOptions<
 	queueProducers: QueueProducers;
 	queueConsumers: QueueConsumers;
 	hyperdriveProxyController: HyperdriveProxyController;
+	// Plugin names (e.g. "kv") whose *local* storage is being routed to a shared
+	// storage owner process. Plugins listed here should skip standing up their
+	// local storage services (disk/DO/migrations); their bindings are rewritten
+	// to the storage-owner proxy by `Miniflare`.
+	storageOwnerRoutePlugins: Set<string>;
 }
 
 export interface ServicesExtensions {

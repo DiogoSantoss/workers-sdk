@@ -15,6 +15,7 @@ import { $ as colors$, bold, dim, green, yellow } from "kleur/colors";
 import stoppable from "stoppable";
 import { getGlobalDispatcher, Pool } from "undici";
 import SCRIPT_DEV_REGISTRY_PROXY from "worker:core/dev-registry-proxy";
+import SCRIPT_STORAGE_OWNER_PROXY from "worker:core/storage-owner-proxy";
 import SCRIPT_MINIFLARE_SHARED from "worker:shared/index";
 import SCRIPT_MINIFLARE_ZOD from "worker:shared/zod";
 import { WebSocketServer } from "ws";
@@ -97,6 +98,7 @@ import {
 	NoOpLog,
 	OWNER_HEARTBEAT_MS,
 	parseWithRootPath,
+	readStorageOwner,
 	registerStorageClient,
 	stripAnsi,
 	unregisterStorageClient,
@@ -115,6 +117,7 @@ import {
 	CorePaths,
 	LogLevel,
 	Mutex,
+	SharedBindings,
 	SharedHeaders,
 	SiteBindings,
 } from "./workers";
@@ -172,6 +175,12 @@ import type { Duplex, Transform, Writable } from "node:stream";
 import type { Dispatcher, Response as UndiciResponse } from "undici";
 
 const DEFAULT_HOST = "127.0.0.1";
+// Service / binding names for the client-side storage-owner proxy worker.
+const SERVICE_STORAGE_OWNER_PROXY = "storage-owner-proxy";
+const STORAGE_OWNER_PROXY_ENTRYPOINT = "StorageOwnerProxy";
+const BINDING_STORAGE_OWNER_DEBUG_PORT = "STORAGE_OWNER_DEBUG_PORT";
+const BINDING_STORAGE_OWNER_ADDRESS = "STORAGE_OWNER_ADDRESS";
+
 const PERSIST_ROOT_STARTUP_LOCK = ".miniflare-startup.lock";
 const PERSIST_ROOT_STARTUP_LOCK_STALE_MS = 30_000;
 const PERSIST_ROOT_STARTUP_LOCK_RETRY_MS = 50;
@@ -724,6 +733,55 @@ function getExternalServiceEntrypoints(allWorkerOpts: PluginWorkerOptions[]) {
 	}
 
 	return externalServices;
+}
+
+/**
+ * Extracts the resource id carried in an object-entry binding's `props.json`
+ * (written by `buildObjectEntryProps`), or `undefined` if the props don't carry
+ * one (e.g. remote/mixed-mode bindings).
+ */
+function extractObjectEntryId(
+	propsJson: string | undefined
+): string | undefined {
+	if (propsJson === undefined) {
+		return undefined;
+	}
+	try {
+		const parsed = JSON.parse(propsJson) as Record<string, unknown>;
+		const id = parsed[SharedBindings.TEXT_NAMESPACE];
+		return typeof id === "string" ? id : undefined;
+	} catch {
+		return undefined;
+	}
+}
+
+/** Builds a service designator routing a storage binding through the proxy. */
+function storageOwnerProxyDesignator(ownerService: string, id: string) {
+	return {
+		name: SERVICE_STORAGE_OWNER_PROXY,
+		entrypoint: STORAGE_OWNER_PROXY_ENTRYPOINT,
+		props: { json: JSON.stringify({ ownerService, namespace: id }) },
+	};
+}
+
+/**
+ * If `binding` is a *local* storage binding pointing at a shared object-entry
+ * service with a resource id in props, rewrite it to route through the
+ * client-side storage-owner proxy (so the owner process performs the storage
+ * I/O). Remote (mixed-mode) bindings — which carry no object-entry id — are
+ * returned unchanged.
+ */
+function rewriteStorageOwnerBinding(binding: Worker_Binding): Worker_Binding {
+	if ("kvNamespace" in binding && binding.kvNamespace?.name !== undefined) {
+		const id = extractObjectEntryId(binding.kvNamespace.props?.json);
+		if (id !== undefined) {
+			return {
+				name: binding.name,
+				kvNamespace: storageOwnerProxyDesignator(binding.kvNamespace.name, id),
+			};
+		}
+	}
+	return binding;
 }
 
 function invalidWrappedAsBound(name: string, bindingType: string): never {
@@ -2044,6 +2102,15 @@ export class Miniflare {
 			? getExternalServiceEntrypoints(allWorkerOpts)
 			: null;
 
+		// When acting as a shared-storage *client*, resolve the owner so local
+		// storage bindings can be routed to it (and local storage services
+		// skipped). `undefined` => behave normally (owner role, feature off, or
+		// no owner currently published).
+		const storageOwnerRouting = this.#getStorageOwnerRouting();
+		const storageOwnerRoutePlugins = new Set<string>(
+			storageOwnerRouting !== undefined ? ["kv"] : []
+		);
+
 		const durableObjectClassNames = getDurableObjectClassNames(allWorkerOpts);
 		const wrappedBindingNames = getWrappedBindingNames(
 			allWorkerOpts,
@@ -2138,7 +2205,12 @@ export class Miniflare {
 					i
 				);
 				if (pluginBindings !== undefined) {
-					for (const binding of pluginBindings) {
+					for (const originalBinding of pluginBindings) {
+						// When routing this plugin's storage to a shared owner, repoint
+						// local storage bindings at the storage-owner proxy.
+						const binding = storageOwnerRoutePlugins.has(key)
+							? rewriteStorageOwnerBinding(originalBinding)
+							: originalBinding;
 						// If this is the Workers Sites manifest, we need to add it as a
 						// module for modules workers. For all other bindings, and in
 						// service workers, just add to worker bindings.
@@ -2233,6 +2305,7 @@ export class Miniflare {
 				queueProducers,
 				queueConsumers,
 				hyperdriveProxyController: this.#hyperdriveProxyController,
+				storageOwnerRoutePlugins,
 			};
 			for (const [key, plugin] of this.#mergedPluginEntries) {
 				const workerOptions = this.#getWorkerOptsForPlugin(key, workerOpts);
@@ -2399,6 +2472,36 @@ export class Miniflare {
 				address: "127.0.0.1:0",
 				service: { name: getUserServiceName(SERVICE_DEV_REGISTRY_PROXY) },
 				http: {},
+			});
+		}
+
+		// Client-side storage-owner proxy: forwards repointed storage bindings to
+		// the owner process's object-entry services over its debug port. The
+		// owner's address is baked in here; routed bindings carry the owner
+		// service name + resource id via props.
+		if (storageOwnerRouting !== undefined) {
+			services.set(SERVICE_STORAGE_OWNER_PROXY, {
+				name: SERVICE_STORAGE_OWNER_PROXY,
+				worker: {
+					compatibilityDate: "2025-01-01",
+					compatibilityFlags: ["nodejs_compat", "experimental"],
+					modules: [
+						{
+							name: "storage-owner-proxy.worker.js",
+							esModule: SCRIPT_STORAGE_OWNER_PROXY(),
+						},
+					],
+					bindings: [
+						{
+							name: BINDING_STORAGE_OWNER_DEBUG_PORT,
+							workerdDebugPort: kVoid,
+						},
+						{
+							name: BINDING_STORAGE_OWNER_ADDRESS,
+							text: storageOwnerRouting.ownerAddress,
+						},
+					],
+				},
 			});
 		}
 
@@ -2773,6 +2876,28 @@ export class Miniflare {
 			return undefined;
 		}
 		return core.defaultPersistRoot;
+	}
+
+	/**
+	 * Resolves the storage owner this instance (as a *client*) should route to,
+	 * or `undefined` to behave normally (owner role, feature off, no persist
+	 * root, or no owner currently published).
+	 */
+	#getStorageOwnerRouting(): { ownerAddress: string } | undefined {
+		const core = this.#sharedOpts.core;
+		const persistRoot = this.#storageOwnerPersistRoot();
+		if (persistRoot === undefined || core.unsafeStorageOwnerRole === "owner") {
+			return undefined;
+		}
+		const owner = readStorageOwner(persistRoot);
+		if (owner === undefined) {
+			this.#log.warn(
+				"Shared storage owner enabled but no owner is currently published — " +
+					"using local storage for this instance"
+			);
+			return undefined;
+		}
+		return { ownerAddress: owner.debugPortAddress };
 	}
 
 	/**
