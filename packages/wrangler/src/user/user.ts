@@ -12,6 +12,7 @@
 
 import assert from "node:assert";
 import {
+	createFileStorage,
 	getAuthFromEnv as getAuthFromEnvShared,
 	readStoredAuthState,
 } from "@cloudflare/workers-auth";
@@ -30,10 +31,7 @@ import { NoDefaultValueProvided, select } from "../dialogs";
 import { isNonInteractiveOrCI } from "../is-interactive";
 import { logger } from "../logger";
 import openInBrowser from "../open-in-browser";
-import {
-	createTomlFileStorage,
-	defaultAuthConfigStorage,
-} from "./auth-config-file";
+import { defaultAuthConfigLocation } from "./auth-config-file";
 import {
 	getClientIdFromEnv,
 	getCloudflareAccountIdFromEnv,
@@ -82,7 +80,7 @@ const WRANGLER_CONSENT_PAGES = {
 	},
 };
 
-const authConfigStorage = defaultAuthConfigStorage();
+const authConfigLocation = defaultAuthConfigLocation();
 
 const oauthFlow = createOAuthFlow({
 	logger,
@@ -93,12 +91,13 @@ const oauthFlow = createOAuthFlow({
 	clientId: getClientIdFromEnv,
 	consent: WRANGLER_CONSENT_PAGES,
 	redirectUri: OAUTH_CALLBACK_URL,
-	storage: authConfigStorage,
+	authConfig: authConfigLocation,
 	allowGlobalAuthKey: true,
 	temporary: {
-		storage: createTomlFileStorage<TemporaryPreviewAccount>(
-			getTemporaryPreviewAccountConfigPath
-		),
+		account: {
+			getPath: getTemporaryPreviewAccountConfigPath,
+			format: "toml",
+		},
 		prompt: ensureTemporaryTermsAccepted,
 	},
 	generateAuthUrl,
@@ -222,7 +221,7 @@ export function listScopes(message = "💁 Available scopes:"): void {
 export function getScopes(): Scope[] | undefined {
 	return readStoredAuthState({
 		warningLogger: logger,
-		storage: authConfigStorage,
+		storage: createFileStorage(authConfigLocation),
 	}).scopes as Scope[] | undefined;
 }
 
