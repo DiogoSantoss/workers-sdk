@@ -4,6 +4,48 @@ import {
 } from "@cloudflare/workers-utils";
 
 /**
+ * `WRANGLER_CLIENT_ID` is the UUID of the registered OAuth app used to identify
+ * the CLI to the Cloudflare OAuth server. Defaults to wrangler's app (the same
+ * app that mints the stored OAuth token), so that a delegated tool such as
+ * `@cloudflare/remote-bindings` can refresh that token with a matching client
+ * ID. A CLI that registers its own OAuth app should set `WRANGLER_CLIENT_ID`.
+ *
+ * Normally you should not need to set this explicitly.
+ * If you want to switch to the staging environment set the
+ * `WRANGLER_API_ENVIRONMENT=staging` environment variable instead.
+ */
+/**
+ * `CLOUDFLARE_OAUTH_CLIENT_ID` is the CLI-neutral name for the OAuth client ID.
+ * Preferred over the wrangler-branded `WRANGLER_CLIENT_ID` so a non-wrangler CLI
+ * (e.g. `cf`) can configure the OAuth app it minted a token with — for example
+ * when a delegated tool such as `@cloudflare/remote-bindings` needs to refresh
+ * that token — without setting a `WRANGLER_`-prefixed variable.
+ */
+const getOAuthClientIdFromEnv = getEnvironmentVariableFactory({
+	variableName: "CLOUDFLARE_OAUTH_CLIENT_ID",
+});
+
+/**
+ * `WRANGLER_CLIENT_ID` is the UUID of wrangler's registered OAuth app. Retained
+ * for backwards compatibility and as the source of the prod/staging defaults.
+ */
+const getWranglerClientIdFromEnv = getEnvironmentVariableFactory({
+	variableName: "WRANGLER_CLIENT_ID",
+	defaultValue: () =>
+		getCloudflareApiEnvironmentFromEnv() === "staging"
+			? "4b2ea6cc-9421-4761-874b-ce550e0e3def"
+			: "54d11594-84e4-41aa-b438-e81b8fa78ee7",
+});
+
+/**
+ * Resolve the OAuth client ID, preferring the CLI-neutral
+ * `CLOUDFLARE_OAUTH_CLIENT_ID`, then `WRANGLER_CLIENT_ID`, then wrangler's
+ * prod/staging default.
+ */
+export const getClientIdFromEnv = (): string =>
+	getOAuthClientIdFromEnv() ?? getWranglerClientIdFromEnv();
+
+/**
  * `WRANGLER_AUTH_DOMAIN` is the URL base domain that is used
  * to access OAuth URLs for the Cloudflare APIs.
  *

@@ -7,8 +7,24 @@
 // tests.
 
 export type { ConfigStorage } from "./config-file";
-
 export type { AuthConfigStorage, UserAuthConfig } from "./config-file/auth";
+
+// Auth storage is configured by a `ConfigFileLocation` (path + format) —
+// workers-auth owns the file I/O. Both fields are plain values, so a CLI can
+// configure them entirely from environment variables (no storage object to
+// inject). `createOAuthFlow` / `createEnvApiTokenResolver` take a location;
+// `createFileStorage(location)` builds a read/write storage for consumers that
+// need direct access (e.g. `readStoredAuthState`).
+export { createFileStorage } from "./config-file/file-storage";
+export type {
+	ConfigFileLocation,
+	StorageFileFormat,
+} from "./config-file/file-storage";
+
+export {
+	defaultAuthConfigLocation,
+	getAuthConfigFilePath,
+} from "./config-file/default-auth-storage";
 export {
 	getAuthFromEnv,
 	getCloudflareAPITokenFromEnv,
@@ -16,20 +32,33 @@ export {
 	getCloudflareGlobalAuthKeyFromEnv,
 } from "./credentials";
 
+export { createEnvApiTokenResolver } from "./credentials-resolver";
+export type { EnvApiTokenResolverOptions } from "./credentials-resolver";
+
 export {
 	clearAccessCaches,
 	domainUsesAccess,
 	getAccessHeaders,
 } from "./access";
 
-export { getAuthUrlFromEnv } from "./env-vars";
+export { getAuthUrlFromEnv, getClientIdFromEnv } from "./env-vars";
 
 export { createOAuthFlow } from "./flow";
 export type {
 	LoginOrRefreshFailureReason,
 	LoginOrRefreshResult,
 	LoginProps,
+	OAuthFlowAPI,
 } from "./flow";
+
+export type {
+	OAuthConsentPages,
+	OAuthFlowContext,
+	OAuthFlowLogger,
+	OAuthFlowTemporaryContext,
+} from "./context";
+
+export { normalizeLogger } from "./logger";
 
 export { generateAuthUrl } from "./generate-auth-url";
 

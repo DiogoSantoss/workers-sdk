@@ -1,5 +1,4 @@
-import type { AuthConfigStorage } from "./config-file/auth";
-import type { TemporaryAccountStorage } from "./config-file/temporary";
+import type { ConfigFileLocation } from "./config-file/file-storage";
 import type { generateAuthUrl as defaultGenerateAuthUrl } from "./generate-auth-url";
 import type { generateRandomState as defaultGenerateRandomState } from "./generate-random-state";
 
@@ -8,8 +7,11 @@ import type { generateRandomState as defaultGenerateRandomState } from "./genera
  * preview account"
  */
 export interface OAuthFlowTemporaryContext {
-	/** Persistence backend for the cached temporary preview account. */
-	storage: TemporaryAccountStorage;
+	/**
+	 * Where the cached temporary preview account is stored (path + format).
+	 * workers-auth owns the file I/O.
+	 */
+	account: ConfigFileLocation;
 	/**
 	 * Hook to customise the terms-acceptance interactive prompt
 	 *  - question: the question to ask a user in interactive mode.
@@ -104,9 +106,11 @@ export interface OAuthFlowContext {
 	redirectUri: string;
 
 	/**
-	 * Persistence backend for the stored auth config.
+	 * Where the stored auth config lives (path + format). workers-auth owns the
+	 * file I/O — the consumer only configures the location, which means it can be
+	 * driven entirely from environment variables.
 	 */
-	storage: AuthConfigStorage;
+	authConfig: ConfigFileLocation;
 
 	/**
 	 * Whether the flow's credential resolvers (`getAPIToken` / `requireApiToken`)

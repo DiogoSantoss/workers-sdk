@@ -64,9 +64,8 @@ export function _resetDeprecatedV1ApiTokenWarningLatch(): void {
  * @param options.warningLogger if provided, a one-time warning is emitted when a
  * deprecated v1 `api_token` is found on disk. Pass the consumer's logger (e.g.
  * wrangler's logger singleton) to surface this to the user.
- * @param options.storage the persistence backend to read from, injected by the
- * consumer (e.g. wrangler's TOML-file-on-disk storage under the global Wrangler
- * config directory).
+ * @param options.storage the storage to read from. Build one from a
+ * `ConfigFileLocation` via `createFileStorage`.
  */
 export function readStoredAuthState(options: {
 	configOverride?: UserAuthConfig;

@@ -19,6 +19,7 @@ import {
 import dedent from "ts-dedent";
 import { fetch } from "undici";
 import { getOauthToken } from "./callback-server";
+import { createFileStorage } from "./config-file/file-storage";
 import { getAPIToken, requireApiToken } from "./credentials";
 import { getRevokeUrlFromEnv } from "./env-vars";
 import { generateAuthUrl as defaultGenerateAuthUrl } from "./generate-auth-url";
@@ -26,6 +27,7 @@ import { generateRandomState as defaultGenerateRandomState } from "./generate-ra
 import { readStoredAuthState, type OAuthFlowState } from "./state";
 import { getOrCreateTemporaryPreviewAccount } from "./temporary";
 import { exchangeRefreshTokenForAccessToken } from "./token-exchange";
+import type { UserAuthConfig } from "./config-file/auth";
 import type { TemporaryPreviewAccount } from "./config-file/temporary";
 import type { OAuthFlowContext } from "./context";
 import type {
@@ -190,7 +192,7 @@ export function createOAuthFlow(ctx: OAuthFlowContext): OAuthFlowAPI {
 		generateRandomState: ctx.generateRandomState ?? defaultGenerateRandomState,
 	};
 
-	const storage = ctx.storage;
+	const storage = createFileStorage<UserAuthConfig>(ctx.authConfig);
 	const getClientId = () =>
 		typeof ctx.clientId === "function" ? ctx.clientId() : ctx.clientId;
 	const consent = ctx.consent;
@@ -407,7 +409,10 @@ export function createOAuthFlow(ctx: OAuthFlowContext): OAuthFlowAPI {
 
 	async function getOAuthTokenFromLocalState(): Promise<string | undefined> {
 		// Check if we have an OAuth token
-		let stored = readStoredAuthState({ warningLogger: ctx.logger, storage });
+		let stored = readStoredAuthState({
+			warningLogger: ctx.logger,
+			storage,
+		});
 		if (!stored.accessToken) {
 			return undefined;
 		}
@@ -425,7 +430,10 @@ export function createOAuthFlow(ctx: OAuthFlowContext): OAuthFlowAPI {
 				return undefined;
 			}
 			// Re-read after the refresh has persisted the new token to disk.
-			stored = readStoredAuthState({ warningLogger: ctx.logger, storage });
+			stored = readStoredAuthState({
+				warningLogger: ctx.logger,
+				storage,
+			});
 		}
 
 		return stored.accessToken?.value;
@@ -480,7 +488,10 @@ export function createOAuthFlow(ctx: OAuthFlowContext): OAuthFlowAPI {
 		}
 
 		const result = await getOrCreateTemporaryPreviewAccount({
-			...ctx.temporary,
+			prompt: ctx.temporary.prompt,
+			storage: createFileStorage<TemporaryPreviewAccount>(
+				ctx.temporary.account
+			),
 			logger: ctx.logger,
 		});
 		activeTemporaryAccount = result.account;
@@ -489,7 +500,11 @@ export function createOAuthFlow(ctx: OAuthFlowContext): OAuthFlowAPI {
 
 	function clearTemporaryAccount(): boolean {
 		activeTemporaryAccount = undefined;
-		return ctx.temporary?.storage.clear() ?? false;
+		return ctx.temporary
+			? createFileStorage<TemporaryPreviewAccount>(
+					ctx.temporary.account
+				).clear()
+			: false;
 	}
 
 	return {

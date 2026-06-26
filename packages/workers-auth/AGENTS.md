@@ -12,7 +12,7 @@ CLIs. Internal-only — published as `prerelease: true`.
 - `src/generate-random-state.ts` — CSRF state generator
 - `src/env-vars.ts` — `WRANGLER_*` env-var getters for OAuth endpoints
 - `src/access.ts` — Cloudflare Access detection + service-token / `cloudflared` headers
-- `src/auth-config-file.ts` — the `AuthConfigStorage` / `UserAuthConfig` storage contract (interfaces only; the default TOML-on-disk implementation lives in the consumer, e.g. wrangler's `src/user/auth-config-file.ts`)
+- `src/config-file/` — config-file storage. `file-storage.ts` owns the on-disk I/O (`createFileStorage(location)`, parsing, owner-only perms) parameterised by a `ConfigFileLocation` (`{ getPath, format }`); `default-auth-storage.ts` provides `getAuthConfigFilePath` / `defaultAuthConfigLocation`. Consumers configure only the _location_ (path + format) — both plain values, so a CLI can drive them from env vars.
 - `src/state.ts` — `readStoredAuthState()` + `StoredAuthState` shape
 - `src/token-exchange.ts` — auth-code → token + refresh-token rotation + `fetchAuthToken`
 - `src/callback-server.ts` — local HTTP server for the OAuth callback (listens on the host/port from the consumer's `redirectUri`)
@@ -34,13 +34,15 @@ CLIs. Internal-only — published as `prerelease: true`.
 - `redirectUri` (required) — the registered redirect URI / local callback URL.
   The callback server's listen host/port and route path are all derived from it
   (per-call bind overrides via `LoginProps.callbackHost`/`callbackPort`)
-- `storage` (required) — the consumer's `AuthConfigStorage` token-persistence
-  backend (wrangler's TOML-on-disk default lives in `src/user/auth-config-file.ts`)
+- `authConfig` (required) — the auth-config file `ConfigFileLocation`
+  (`{ getPath, format }`). workers-auth owns the file I/O; the consumer only says
+  where/what format (wrangler: `defaultAuthConfigLocation()`). Because it's plain
+  values, it can be driven entirely from env vars (`CLOUDFLARE_AUTH_CONFIG_FILE`)
 - `purgeOnLoginOrLogout?()` — invalidate consumer-side caches after login/logout
 - `generateAuthUrl?` / `generateRandomState?` — test overrides for deterministic
   snapshot tests (defaults pull from `./generate-auth-url` / `./generate-random-state`)
 
-`clientId`, `consent`, `redirectUri`, and `storage` are consumer-specific
+`clientId`, `consent`, `redirectUri`, and `authConfig` are consumer-specific
 (Wrangler's live in `packages/wrangler/src/user/`), so they are required rather
 than defaulted here.
 
