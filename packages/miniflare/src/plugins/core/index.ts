@@ -324,6 +324,12 @@ export const CoreSharedOptionsSchema = z
 		// Path to the root directory for persisting data
 		// Used as the default for all plugins with the plugin name as the subdirectory name
 		defaultPersistRoot: z.string().optional(),
+		// EXPERIMENTAL: route all storage (KV/R2/D1/Cache) for a given persist
+		// root through a single detached "owner" process, so exactly one process
+		// opens the underlying SQLite/blob files. Eliminates cross-process SQLite
+		// contention when multiple Miniflare instances share a persist root.
+		// No-op when `defaultPersistRoot` is undefined (pure in-memory storage).
+		unsafeSharedStorageOwner: z.boolean().optional(),
 		// Strip the MF-DISABLE_PRETTY_ERROR header from user request
 		stripDisablePrettyError: z.boolean().default(true),
 
