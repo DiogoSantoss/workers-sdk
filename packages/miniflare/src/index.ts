@@ -1,4 +1,5 @@
 import assert from "node:assert";
+import { spawn } from "node:child_process";
 import crypto from "node:crypto";
 import fs from "node:fs";
 import { mkdir, writeFile } from "node:fs/promises";
@@ -46,6 +47,7 @@ import {
 	KV_PLUGIN_NAME,
 	launchBrowser,
 	loadExternalPlugins,
+	namespaceEntries,
 	normaliseDurableObject,
 	PLUGIN_ENTRIES,
 	ProxyClient,
@@ -91,6 +93,7 @@ import {
 import {
 	_isCyclic,
 	clearStorageOwner,
+	countLiveStorageClients,
 	heartbeatStorageClient,
 	heartbeatStorageOwner,
 	isFileNotFoundError,
@@ -101,6 +104,7 @@ import {
 	readStorageOwner,
 	registerStorageClient,
 	stripAnsi,
+	tryAcquireOwnerSpawnLock,
 	unregisterStorageClient,
 	writeStorageOwner,
 } from "./shared";
@@ -180,6 +184,27 @@ const SERVICE_STORAGE_OWNER_PROXY = "storage-owner-proxy";
 const STORAGE_OWNER_PROXY_ENTRYPOINT = "StorageOwnerProxy";
 const BINDING_STORAGE_OWNER_DEBUG_PORT = "STORAGE_OWNER_DEBUG_PORT";
 const BINDING_STORAGE_OWNER_ADDRESS = "STORAGE_OWNER_ADDRESS";
+
+// Detached storage-owner process bootstrap. The owner runs the same built
+// miniflare module (its path handed over via env), so we avoid a second build
+// entry point. Kept as a constant string with no interpolation so it satisfies
+// the no-unsafe-command-execution lint rule.
+const STORAGE_OWNER_BOOTSTRAP =
+	"require(process.env.MINIFLARE_STORAGE_OWNER_MAIN).runStorageOwnerProcess()";
+const ENV_STORAGE_OWNER_MAIN = "MINIFLARE_STORAGE_OWNER_MAIN";
+const ENV_STORAGE_OWNER_CONFIG = "MINIFLARE_STORAGE_OWNER_CONFIG";
+// How long a client waits for a freshly spawned owner to publish itself.
+const STORAGE_OWNER_SPAWN_TIMEOUT_MS = 30_000;
+const STORAGE_OWNER_POLL_MS = 50;
+// Owner self-teardown tuning: a startup grace period before the owner is
+// eligible to exit, and a debounce so a transient client gap (e.g. a reload)
+// doesn't tear storage down. Overridable via env (read by the spawned owner
+// process, which inherits the spawner's environment) primarily for tests.
+const STORAGE_OWNER_STARTUP_GRACE_MS =
+	Number(process.env.MINIFLARE_STORAGE_OWNER_GRACE_MS) || 10_000;
+const STORAGE_OWNER_IDLE_CHECK_MS =
+	Number(process.env.MINIFLARE_STORAGE_OWNER_IDLE_CHECK_MS) || 1_000;
+const STORAGE_OWNER_IDLE_DEBOUNCE = 3;
 
 const PERSIST_ROOT_STARTUP_LOCK = ".miniflare-startup.lock";
 const PERSIST_ROOT_STARTUP_LOCK_STALE_MS = 30_000;
@@ -2102,6 +2127,10 @@ export class Miniflare {
 			? getExternalServiceEntrypoints(allWorkerOpts)
 			: null;
 
+		// As a client, ensure an owner exists (spawning a detached one if needed)
+		// before we resolve routing below.
+		await this.#ensureStorageOwner();
+
 		// When acting as a shared-storage *client*, resolve the owner so local
 		// storage bindings can be routed to it (and local storage services
 		// skipped). `undefined` => behave normally (owner role, feature off, or
@@ -2901,6 +2930,115 @@ export class Miniflare {
 	}
 
 	/**
+	 * As a client, make sure a storage owner exists for our persist root before
+	 * we assemble (and therefore route to it). If none is published, elect a
+	 * single spawner via the owner spawn-lock, spawn a detached owner process,
+	 * and wait for it to publish itself. Other clients just wait.
+	 *
+	 * Best-effort: on any failure we log and fall back to local storage (the
+	 * client simply won't route), so the feature degrades rather than crashes.
+	 */
+	async #ensureStorageOwner(): Promise<void> {
+		const core = this.#sharedOpts.core;
+		const persistRoot = this.#storageOwnerPersistRoot();
+		if (persistRoot === undefined || core.unsafeStorageOwnerRole === "owner") {
+			return;
+		}
+		if (core.unsafeDevRegistryPath === undefined) {
+			// The owner exposes itself over a workerd debug port, which is only
+			// enabled when the dev registry is. Without it the feature can't work.
+			this.#log.warn(
+				"`unsafeSharedStorageOwner` requires `unsafeDevRegistryPath` to be " +
+					"set — using local storage for this instance"
+			);
+			return;
+		}
+		if (readStorageOwner(persistRoot) !== undefined) {
+			return;
+		}
+
+		let lock: ReturnType<typeof tryAcquireOwnerSpawnLock>;
+		try {
+			lock = tryAcquireOwnerSpawnLock(persistRoot);
+			// Re-check under the lock: another client may have just published one.
+			if (readStorageOwner(persistRoot) !== undefined) {
+				return;
+			}
+			if (lock !== undefined) {
+				this.#spawnStorageOwner(persistRoot);
+			}
+			// Wait for the owner (ours or another client's) to publish itself.
+			const deadline = Date.now() + STORAGE_OWNER_SPAWN_TIMEOUT_MS;
+			while (
+				readStorageOwner(persistRoot) === undefined &&
+				Date.now() < deadline &&
+				!this.#disposeController.signal.aborted
+			) {
+				await new Promise((resolve) =>
+					setTimeout(resolve, STORAGE_OWNER_POLL_MS)
+				);
+			}
+			if (readStorageOwner(persistRoot) === undefined) {
+				this.#log.warn(
+					"Timed out waiting for the shared storage owner to start — " +
+						"using local storage for this instance"
+				);
+			}
+		} catch (e) {
+			this.#log.warn(`Failed to ensure a shared storage owner: ${String(e)}`);
+		} finally {
+			lock?.release();
+		}
+	}
+
+	/**
+	 * Spawns a detached owner process for the persist root, hosting the storage
+	 * resources this instance uses. The owner runs the same built miniflare
+	 * module and self-terminates once no clients remain (see
+	 * {@link runStorageOwnerProcess}).
+	 */
+	#spawnStorageOwner(persistRoot: string): void {
+		// Union of local (non-remote) storage resource ids across all workers, so
+		// the owner stands up the corresponding storage services. The services are
+		// generic (keyed by `idFromName`), so they additionally serve ids declared
+		// only by other clients.
+		const kvIds = new Set<string>();
+		for (const workerOpts of this.#workerOpts) {
+			for (const [, ns] of namespaceEntries(workerOpts.kv.kvNamespaces)) {
+				if (!ns.remoteProxyConnectionString) {
+					kvIds.add(ns.id);
+				}
+			}
+		}
+
+		const ownerOptions = {
+			defaultPersistRoot: persistRoot,
+			unsafeDevRegistryPath: this.#sharedOpts.core.unsafeDevRegistryPath,
+			modules: true,
+			script:
+				"export default { async fetch() { return new Response('miniflare storage owner', { status: 404 }); } }",
+			kvNamespaces: [...kvIds],
+		};
+
+		const configPath = path.join(
+			persistRoot,
+			`.miniflare-owner-config-${process.pid}.json`
+		);
+		fs.writeFileSync(configPath, JSON.stringify(ownerOptions));
+
+		const child = spawn(process.execPath, ["-e", STORAGE_OWNER_BOOTSTRAP], {
+			detached: true,
+			stdio: "ignore",
+			env: {
+				...process.env,
+				[ENV_STORAGE_OWNER_MAIN]: __filename,
+				[ENV_STORAGE_OWNER_CONFIG]: configPath,
+			},
+		});
+		child.unref();
+	}
+
+	/**
 	 * Publishes this instance's role in the shared-storage topology once the
 	 * runtime (and therefore the debug port) is available:
 	 * - owner: writes the owner definition so clients can discover and route to
@@ -3531,6 +3669,76 @@ export class Miniflare {
 			maybeInstanceRegistry?.delete(this);
 		}
 	}
+}
+
+/**
+ * Entry point for the detached storage-owner process spawned by a client (see
+ * `Miniflare.#spawnStorageOwner`). Reads its config from a temp file named in
+ * the environment, starts a headless owner-role Miniflare, and self-terminates
+ * once no clients have been present for a debounce window (after a startup
+ * grace period), so storage processes don't linger.
+ */
+export async function runStorageOwnerProcess(): Promise<void> {
+	const configPath = process.env[ENV_STORAGE_OWNER_CONFIG];
+	assert(configPath !== undefined, `${ENV_STORAGE_OWNER_CONFIG} must be set`);
+	const options = JSON.parse(
+		fs.readFileSync(configPath, "utf8")
+	) as MiniflareOptions;
+	// The config file has served its purpose; remove it.
+	fs.rmSync(configPath, { force: true });
+
+	const persistRoot = (options as { defaultPersistRoot?: string })
+		.defaultPersistRoot;
+	assert(
+		persistRoot !== undefined,
+		"storage owner config must set `defaultPersistRoot`"
+	);
+
+	const mf = new Miniflare({
+		...options,
+		unsafeSharedStorageOwner: true,
+		unsafeStorageOwnerRole: "owner",
+	});
+
+	let disposing = false;
+	// Holder so `shutdown` (defined before the interval is created) can clear it.
+	const timers: { idle?: NodeJS.Timeout } = {};
+	const shutdown = async () => {
+		if (disposing) {
+			return;
+		}
+		disposing = true;
+		if (timers.idle !== undefined) {
+			clearInterval(timers.idle);
+		}
+		try {
+			await mf.dispose();
+		} finally {
+			process.exit(0);
+		}
+	};
+	process.on("SIGTERM", () => void shutdown());
+	process.on("SIGINT", () => void shutdown());
+
+	await mf.ready;
+
+	// Self-teardown: once past the startup grace, exit after a debounced run of
+	// checks observing zero live clients.
+	const startedAt = Date.now();
+	let idleChecks = 0;
+	timers.idle = setInterval(() => {
+		if (Date.now() - startedAt < STORAGE_OWNER_STARTUP_GRACE_MS) {
+			return;
+		}
+		if (countLiveStorageClients(persistRoot) === 0) {
+			idleChecks++;
+			if (idleChecks >= STORAGE_OWNER_IDLE_DEBOUNCE) {
+				void shutdown();
+			}
+		} else {
+			idleChecks = 0;
+		}
+	}, STORAGE_OWNER_IDLE_CHECK_MS);
 }
 
 export type { WorkerdStructuredLog } from "./plugins/core";

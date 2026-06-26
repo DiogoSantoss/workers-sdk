@@ -278,6 +278,77 @@ describe.sequential("owner presence integration", () => {
 		}
 	});
 
+	it("auto-spawns a detached owner, routes to it, and tears it down when idle", async ({
+		expect,
+	}) => {
+		const persistRoot = await useTmp();
+		const registryPath = await useTmp();
+		// Shrink the owner's teardown timings (inherited by the spawned process).
+		const prevGrace = process.env.MINIFLARE_STORAGE_OWNER_GRACE_MS;
+		const prevCheck = process.env.MINIFLARE_STORAGE_OWNER_IDLE_CHECK_MS;
+		process.env.MINIFLARE_STORAGE_OWNER_GRACE_MS = "500";
+		process.env.MINIFLARE_STORAGE_OWNER_IDLE_CHECK_MS = "200";
+
+		let ownerPid: number | undefined;
+		const client = new Miniflare({
+			// No role set → behaves as a client and auto-spawns an owner.
+			unsafeSharedStorageOwner: true,
+			defaultPersistRoot: persistRoot,
+			unsafeDevRegistryPath: registryPath,
+			compatibilityFlags: ["experimental"],
+			compatibilityDate: "2025-01-01",
+			modules: true,
+			kvNamespaces: ["NS"],
+			script: `export default {
+				async fetch(request, env) {
+					if (request.method === "PUT") {
+						await env.NS.put("k", await request.text());
+						return new Response("ok");
+					}
+					return new Response((await env.NS.get("k")) ?? "<null>");
+				}
+			}`,
+		});
+
+		try {
+			await client.ready;
+
+			// An owner was auto-spawned and published itself.
+			const def = readStorageOwner(persistRoot);
+			expect(def).toBeDefined();
+			ownerPid = def?.pid;
+			expect(ownerPid).toBeDefined();
+			expect(ownerPid).not.toBe(process.pid); // a separate process
+
+			// Storage works through the routed proxy.
+			await (
+				await client.dispatchFetch("http://x/", {
+					method: "PUT",
+					body: "via-auto-owner",
+				})
+			).text();
+			const got = await client.dispatchFetch("http://x/");
+			expect(await got.text()).toBe("via-auto-owner");
+
+			// Disposing the only client should let the owner self-terminate.
+			await client.dispose();
+			await vi.waitFor(
+				() => expect(readStorageOwner(persistRoot)).toBeUndefined(),
+				{ timeout: 15_000, interval: 200 }
+			);
+		} finally {
+			await client.dispose().catch(() => {});
+			// Safety net: ensure the detached owner isn't leaked if assertions failed.
+			if (ownerPid !== undefined && isProcessAlive(ownerPid)) {
+				try {
+					process.kill(ownerPid);
+				} catch {}
+			}
+			process.env.MINIFLARE_STORAGE_OWNER_GRACE_MS = prevGrace;
+			process.env.MINIFLARE_STORAGE_OWNER_IDLE_CHECK_MS = prevCheck;
+		}
+	});
+
 	it("does nothing when the feature flag is off", async ({ expect }) => {
 		const persistRoot = await useTmp();
 		const registryPath = await useTmp();
