@@ -1,7 +1,25 @@
 import os from "node:os";
 import path from "node:path";
 import xdgAppPaths from "xdg-app-paths";
+import { getEnvironmentVariableFactory } from "./environment-variables/factory";
 import { isDirectory } from "./fs-helpers";
+
+/**
+ * `CLOUDFLARE_CONFIG_DIR` pins the global config directory for the whole
+ * process tree.
+ *
+ * A top-level CLI (e.g. `wrangler dev` or a future `cf dev`) can set this so
+ * that tools it delegates to — the Vite plugin and `@cloudflare/remote-bindings`
+ * — discover the *same* OAuth token location and can refresh tokens mid-run,
+ * even when the delegated tool would otherwise resolve a different default
+ * (e.g. a different `appName`).
+ *
+ * When set, it takes precedence over the legacy `~/.<appName>` directory and the
+ * XDG-compliant path.
+ */
+export const getGlobalConfigDirFromEnv = getEnvironmentVariableFactory({
+	variableName: "CLOUDFLARE_CONFIG_DIR",
+});
 
 export interface GetGlobalConfigPathOptions {
 	/**
@@ -34,7 +52,14 @@ export function getGlobalConfigPath({
 	leadingDot = true,
 	useLegacyHomeDir = true,
 }: GetGlobalConfigPathOptions = {}) {
-	//TODO: We should implement a custom path --global-config and/or the WRANGLER_HOME type environment variable
+	// An explicit `CLOUDFLARE_CONFIG_DIR` pins the location for the whole process
+	// tree, so a delegated tool resolves the same config (and OAuth token) as the
+	// top-level CLI that invoked it.
+	const configDirFromEnv = getGlobalConfigDirFromEnv();
+	if (configDirFromEnv) {
+		return configDirFromEnv;
+	}
+
 	const dirName = `${leadingDot ? "." : ""}${appName}`;
 	const configDir = xdgAppPaths(dirName).config(); // New XDG compliant config path
 

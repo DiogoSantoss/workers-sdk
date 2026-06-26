@@ -77,6 +77,10 @@ type VariableNames =
 
 	/** Custom directory for Wrangler's cache files (overrides `node_modules/.cache/wrangler`). */
 	| "WRANGLER_CACHE_DIR"
+	/** Custom directory for the global config (auth tokens, etc.). Lets a top-level CLI pin the config location for the whole process tree, so delegated tools (e.g. the Vite plugin / `@cloudflare/remote-bindings`) discover the same OAuth token location. Overrides the default XDG / `~/.wrangler` resolution. */
+	| "CLOUDFLARE_CONFIG_DIR"
+	/** Absolute path to the OAuth auth-config file a delegated tool should read/refresh. Lets a top-level CLI whose auth file differs from wrangler's default (e.g. `cf`, which uses JSON/JSONC at a custom location) point `@cloudflare/remote-bindings` at the exact file. The on-disk format is inferred from the extension (`.toml` / `.json` / `.jsonc`). */
+	| "CLOUDFLARE_AUTH_CONFIG_FILE"
 	/** Custom path to cloudflared binary (overrides automatic binary management). */
 	| "CLOUDFLARED_PATH"
 
@@ -90,6 +94,12 @@ type VariableNames =
 	| "WRANGLER_AUTH_URL"
 	/** Custom OAuth client ID (usually auto-configured). */
 	| "WRANGLER_CLIENT_ID"
+	/** CLI-neutral OAuth client ID, preferred over `WRANGLER_CLIENT_ID`. Lets a non-wrangler CLI (e.g. `cf`) configure the OAuth app used to refresh its token in delegated tools. */
+	| "CLOUDFLARE_OAUTH_CLIENT_ID"
+	/** Whether delegated auth resolution should honour the global API key + email pair (`CLOUDFLARE_API_KEY` + `CLOUDFLARE_EMAIL`) in addition to scoped API tokens. Defaults to `true` (wrangler's behaviour); CLIs that only support scoped tokens (e.g. `cf`) set this to `false`. */
+	| "CLOUDFLARE_ALLOW_GLOBAL_API_KEY"
+	/** The command a user should run to authenticate (e.g. `cf login`), used to make delegated "not authenticated" errors actionable for the driving CLI. */
+	| "CLOUDFLARE_LOGIN_COMMAND"
 	/** Custom token URL (usually auto-configured). */
 	| "WRANGLER_TOKEN_URL"
 	/** Custom token revocation URL (usually auto-configured). */
