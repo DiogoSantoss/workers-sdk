@@ -1,5 +1,13 @@
 # @cloudflare/vite-plugin
 
+## 1.42.4
+
+### Patch Changes
+
+- Updated dependencies [[`c4e4681`](https://github.com/cloudflare/workers-sdk/commit/c4e4681d9d5c80ba0c0ed78aae8fbbb8593a33dd), [`674fd30`](https://github.com/cloudflare/workers-sdk/commit/674fd30359d175c0a2d18ea3d0ba772a7f823c13), [`1cea129`](https://github.com/cloudflare/workers-sdk/commit/1cea1299432fdf8e15a8e91816d8fe5e3b53e520), [`61c1ae0`](https://github.com/cloudflare/workers-sdk/commit/61c1ae04190eca832d8f304318ba75a46390ba05), [`fac643b`](https://github.com/cloudflare/workers-sdk/commit/fac643b3d660493246050ebe3358efa22c5622e7), [`524363f`](https://github.com/cloudflare/workers-sdk/commit/524363f59396bead58d8881f474d946ceba47598), [`8344c21`](https://github.com/cloudflare/workers-sdk/commit/8344c211e525de53b8caf969bf7582d941e85877), [`c1bcc34`](https://github.com/cloudflare/workers-sdk/commit/c1bcc34472cd5429960fabfa52684580810c43f4), [`5315f5c`](https://github.com/cloudflare/workers-sdk/commit/5315f5cbe5ecf28c57c6c2e9467489799bb93f6f), [`b9dcdd8`](https://github.com/cloudflare/workers-sdk/commit/b9dcdd8f6abf4d7e07bd2daebb83b99228a9dea4), [`61c1ae0`](https://github.com/cloudflare/workers-sdk/commit/61c1ae04190eca832d8f304318ba75a46390ba05), [`6b14c5b`](https://github.com/cloudflare/workers-sdk/commit/6b14c5bc9b6914c7c9bbcc91a741374441b9070d), [`f4919d0`](https://github.com/cloudflare/workers-sdk/commit/f4919d071e832bf2ae69a67cf0f8bf9052bc974c), [`cb7ad11`](https://github.com/cloudflare/workers-sdk/commit/cb7ad1177a4ba0b06054268229ed39ae111d7c4f), [`19b35c3`](https://github.com/cloudflare/workers-sdk/commit/19b35c379141e5db87a15aeca3076c3a575dd1f7), [`6908d7c`](https://github.com/cloudflare/workers-sdk/commit/6908d7c81b26f6105ee218d24ad5f25a71760781)]:
+  - wrangler@4.106.0
+  - miniflare@4.20260629.0
+
 ## 1.42.3
 
 ### Patch Changes
