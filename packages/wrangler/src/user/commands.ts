@@ -1,17 +1,24 @@
+import {
+	getCloudflareAuthUseKeyringFromEnv,
+	scrubEncryptedCredentials,
+} from "@cloudflare/workers-auth";
 import { CommandLineArgsError, UserError } from "@cloudflare/workers-utils";
 import { readConfig } from "../config";
 import { createCommand, createNamespace } from "../core/create-command";
 import { logger } from "../logger";
 import * as metrics from "../metrics";
-import { getActiveProfile } from "./user";
+import { readUserPreferences, updateUserPreferences } from "./preferences";
 import {
 	DefaultScopeKeys,
+	getActiveProfile,
 	getAuthFromEnv,
+	getCredentialStore,
 	getOAuthTokenFromLocalState,
 	listScopes,
 	login,
 	logout,
 	validateScopeKeys,
+	WRANGLER_KEYRING_SERVICE_NAME,
 } from "./user";
 import { whoami } from "./whoami";
 
@@ -67,6 +74,16 @@ export const loginCommand = createCommand({
 		"scopes-list": {
 			describe: "List all the available OAuth scopes with descriptions",
 		},
+		"use-keyring": {
+			describe:
+				"Store OAuth credentials in the OS keychain instead of a plaintext file (persisted across invocations)",
+			type: "boolean",
+			// Intentionally no `default`: the unset (tri-state `undefined`)
+			// value means "flag not passed", which the handler distinguishes
+			// from an explicit `--use-keyring` / `--no-use-keyring` so it only
+			// touches the persisted preference when the user actually opts in
+			// or out.
+		},
 	},
 	validateArgs(args) {
 		if (args.profile) {
@@ -91,6 +108,107 @@ export const loginCommand = createCommand({
 			listScopes();
 			return;
 		}
+
+		// Persist `--use-keyring` / `--no-use-keyring` before doing the login
+		// so the OAuth callback writes credentials to the requested backend.
+		// The `CLOUDFLARE_AUTH_USE_KEYRING` env var still wins over the
+		// persistent preference, but we warn so the user isn't surprised.
+		if (args.useKeyring !== undefined) {
+			const previouslyEnabled = readUserPreferences().keyring_enabled === true;
+			const envOverride = getCloudflareAuthUseKeyringFromEnv();
+			if (envOverride !== undefined && envOverride !== args.useKeyring) {
+				logger.warn(
+					`CLOUDFLARE_AUTH_USE_KEYRING=${envOverride} overrides the --${args.useKeyring ? "use-keyring" : "no-use-keyring"} flag for this command.`
+				);
+			}
+
+			if (!args.useKeyring && previouslyEnabled) {
+				// Opting out: scrub the encrypted credentials and the keyring
+				// entry **without** decrypting them into a plaintext file —
+				// writing plaintext on disk during opt-out would defeat the
+				// at-rest protection the user just chose to disable, leaving
+				// the same credentials they wanted out of plaintext sitting
+				// on disk in plaintext anyway.
+				//
+				// `scrubEncryptedCredentials` resolves the encrypted backend
+				// directly rather than going through `getCredentialStore()`,
+				// which short-circuits to `FileCredentialStore` when
+				// `CLOUDFLARE_AUTH_USE_KEYRING=false` is set — that would only
+				// remove the plaintext `.toml` and leave the `.enc` file and
+				// keyring entry intact. Passing no `profile` targets the
+				// default profile, which is what `wrangler login` operates on.
+				try {
+					const { backendAvailable } = scrubEncryptedCredentials({
+						serviceName: WRANGLER_KEYRING_SERVICE_NAME,
+					});
+					if (backendAvailable) {
+						logger.log(
+							"Removed the encrypted credentials and the keyring entry. Run `wrangler login` to log in again."
+						);
+					} else {
+						logger.warn(
+							"Removed the encrypted credentials file, but the keyring backend was not reachable on this host so the keyring entry could not be cleared. Clear it manually if it persists. Run `wrangler login` to log in again."
+						);
+					}
+				} catch (e) {
+					logger.warn(
+						`Failed to remove encrypted credentials on opt-out: ${
+							e instanceof Error ? e.message : String(e)
+						}. You may need to clear them manually before logging in again.`
+					);
+				}
+			}
+
+			updateUserPreferences({ keyring_enabled: args.useKeyring });
+
+			if (args.useKeyring && envOverride !== false) {
+				// Resolve the credential store eagerly so any platform-specific
+				// install (Windows lazy-install of @napi-rs/keyring) or probe
+				// failure (Linux missing secret-tool, CI without TTY) surfaces
+				// before the user sits through the OAuth flow.
+				//
+				// `getCredentialStore()` re-reads the persisted preference, so
+				// we have to persist *before* validating. Roll the persist
+				// back in *two* cases so a failed opt-in doesn't leave
+				// `keyring_enabled: true` on disk:
+				//
+				//  1. The resolver threw (e.g. CLOUDFLARE_AUTH_USE_KEYRING=true
+				//     forced + unsupported platform, Windows install failure
+				//     when forced, non-interactive Linux without secret-tool).
+				//  2. The resolver soft-fell-back to the plaintext file store
+				//     (interactive Linux without secret-tool, unsupported
+				//     platform without env-var force, Windows install failure
+				//     not forced). The resolver already warned the user; we
+				//     just need to make sure we don't persist the opt-in on
+				//     top of that warning, because every future command would
+				//     then re-resolve, soft-fall-back again, and warn again
+				//     until the user explicitly ran `--no-use-keyring`.
+				//
+				// We skip this validation when `CLOUDFLARE_AUTH_USE_KEYRING=false`
+				// is set: the resolver short-circuits to `FileCredentialStore`
+				// unconditionally in that case (see `resolver.ts`), so the
+				// `kind !== "encrypted-file"` check would always fire and
+				// roll back the user's persisted preference along with a
+				// misleading "not available on this host" warning. The env
+				// var only governs *this* command (we already warned the
+				// user about that above); the persisted preference is for
+				// future commands, which will resolve normally and warn at
+				// that point if the keyring backend isn't actually reachable.
+				try {
+					const store = getCredentialStore();
+					if (store.kind !== "encrypted-file") {
+						updateUserPreferences({ keyring_enabled: previouslyEnabled });
+						logger.warn(
+							"Keyring storage isn't available on this host (see warning above), so `--use-keyring` was not persisted. Re-run `wrangler login --use-keyring` once the keyring backend is reachable."
+						);
+					}
+				} catch (e) {
+					updateUserPreferences({ keyring_enabled: previouslyEnabled });
+					throw e;
+				}
+			}
+		}
+
 		// Validate `--scopes` up front so we can share a single `login(...)`
 		// call (and a single `sendMetricsEvent("login user", ...)` site) between
 		// the scoped and unscoped paths.
