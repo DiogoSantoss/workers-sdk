@@ -3,6 +3,8 @@
  * render the plan response. No network access.
  */
 
+import { green, red, yellow } from "@cloudflare/cli-shared-helpers/colors";
+
 interface EmailRoutingAction {
 	type: string;
 	value?: string[];
@@ -128,10 +130,10 @@ export function planHasDestructiveChanges(
 }
 
 const CHANGE_MARKERS: Record<PlanChangeType, string> = {
-	added: "+",
+	added: green("+"),
 	updated: "~",
-	deleted: "-",
-	conflict: "!",
+	deleted: red("-"),
+	conflict: yellow("!"),
 };
 
 /** Human description of what a remote rule currently does, for conflict lines. */

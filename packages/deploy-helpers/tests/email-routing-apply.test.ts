@@ -43,6 +43,10 @@ describe("applyEmailRoutingAddresses", () => {
 	let metadataFailures: number[];
 	let planFailures: APIError[];
 	let planBody: unknown;
+	let blockWrites: boolean;
+	let startedTargets: string[];
+	let releaseWrites: () => void;
+	let writesReleased: Promise<void>;
 
 	beforeEach(() => {
 		plan = { zones: [] };
@@ -58,6 +62,12 @@ describe("applyEmailRoutingAddresses", () => {
 		metadataFailures = [];
 		planFailures = [];
 		planBody = undefined;
+		blockWrites = false;
+		startedTargets = [];
+		releaseWrites = () => {};
+		writesReleased = new Promise((resolve) => {
+			releaseWrites = resolve;
+		});
 
 		initDeployHelpersContext({
 			logger: {
@@ -111,6 +121,10 @@ describe("applyEmailRoutingAddresses", () => {
 		if (init?.method === "POST" && path.endsWith("/email/routing/rules")) {
 			const target = (body as { matchers: { value?: string }[] }).matchers[0]
 				?.value;
+			if (blockWrites && target) {
+				startedTargets.push(target);
+				await writesReleased;
+			}
 			if (target === failTarget) {
 				throw new Error("duplicate rule");
 			}
@@ -367,6 +381,34 @@ describe("applyEmailRoutingAddresses", () => {
 		);
 		expect(writes.posts).toHaveLength(1);
 		expect(errors.join("\n")).toContain("bad@example.com: duplicate rule");
+	});
+
+	it("applies all changes concurrently", async ({ expect }) => {
+		blockWrites = true;
+		plan = {
+			zones: [
+				{
+					zone_id: "zone1",
+					changes: [{ type: "added", target: "one@example.com" }],
+				},
+				{
+					zone_id: "zone2",
+					changes: [{ type: "added", target: "two@example.net" }],
+				},
+			],
+		};
+
+		const applying = apply(["one@example.com", "two@example.net"]);
+		try {
+			await vi.waitFor(() => {
+				expect(startedTargets).toEqual(["one@example.com", "two@example.net"]);
+			});
+		} finally {
+			releaseWrites();
+		}
+		await applying;
+
+		expect(writes.posts).toHaveLength(2);
 	});
 
 	it("reports a missing remote rule id as an apply failure", async ({

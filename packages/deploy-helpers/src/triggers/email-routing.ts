@@ -303,26 +303,28 @@ export async function applyEmailRoutingAddresses({
 	let completedChanges = 0;
 
 	try {
-		for (const zone of plan.zones) {
-			for (const change of zone.changes) {
-				try {
-					await applyChange(
-						config,
-						zone.zone_id,
-						change,
-						scriptName,
-						ownerWorkerTag
-					);
-				} catch (e) {
-					failures.push(
-						`${change.target}: ${e instanceof Error ? e.message : String(e)}`
-					);
-				} finally {
-					completedChanges++;
-					progress.update(completedChanges);
-				}
-			}
-		}
+		await Promise.all(
+			plan.zones.flatMap((zone) =>
+				zone.changes.map(async (change) => {
+					try {
+						await applyChange(
+							config,
+							zone.zone_id,
+							change,
+							scriptName,
+							ownerWorkerTag
+						);
+					} catch (e) {
+						failures.push(
+							`${change.target}: ${e instanceof Error ? e.message : String(e)}`
+						);
+					} finally {
+						completedChanges++;
+						progress.update(completedChanges);
+					}
+				})
+			)
+		);
 	} finally {
 		progress.stop();
 	}
