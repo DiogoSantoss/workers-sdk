@@ -1,0 +1,21 @@
+packages/deploy-helpers/src/triggers/email-routing.ts
+  s_defef62ebd8960::t_ba19075aadaa12 306-327
+packages/deploy-helpers/tests/email-routing-apply.test.ts
+  s_defef62ebd8960::t_ced7a8f287c3ed 46-49,65-70,124-127,386-413
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.6.10",
+  "base_commit_sha": "902a0b06375c13ec24ebf71f31bd0b22ffd48653",
+  "prompts": {},
+  "sessions": {
+    "s_defef62ebd8960": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_09af399d9ffeXAvLrztpTvjgDz",
+        "model": "gpt-5.6-sol"
+      },
+      "human_author": "Diogo Santos <dsantos@cloudflare.com>"
+    }
+  }
+}
