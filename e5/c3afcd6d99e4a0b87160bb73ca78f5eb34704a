@@ -1,0 +1,19 @@
+packages/workers-utils/src/config/config.ts
+  s_b79826c316dd36::t_1847f307f4d49f 214-217
+---
+{
+  "schema_version": "authorship/3.0.0",
+  "git_ai_version": "1.7.4",
+  "base_commit_sha": "e5c3afcd6d99e4a0b87160bb73ca78f5eb34704a",
+  "prompts": {},
+  "sessions": {
+    "s_b79826c316dd36": {
+      "agent_id": {
+        "tool": "opencode",
+        "id": "ses_eee27db80ffeJkG54v5rvJHLAX",
+        "model": "unknown"
+      },
+      "human_author": "Diogo Santos <dsantos@cloudflare.com>"
+    }
+  }
+}
